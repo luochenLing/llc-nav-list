@@ -1,6 +1,6 @@
 {
   "name": "llc-nav-list",
-  "version": "0.0.45",
+  "version": "1.0.1",
   "main": "./dist/nav-list.umd.js",
   "types": "./dist/index.d.ts",
   "typings": "./dist/index.d.ts",
