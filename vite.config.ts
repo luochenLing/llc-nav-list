@@ -1,12 +1,14 @@
 import { defineConfig} from 'vite'
 import vue from '@vitejs/plugin-vue'
 import dts from 'vite-plugin-dts'
+import externalGlobals from "rollup-plugin-external-globals";
 
 const path =require('path')
 
 // https://vitejs.dev/config/
 export default defineConfig({
   build:{
+    sourcemap: true,
     target:'esnext',
     outDir:'dist',
     lib:{
@@ -21,7 +23,12 @@ export default defineConfig({
           //UMD下的全局变量名称
           vue:'vue'
         }
-      }
+      },
+      plugins:[
+        externalGlobals({
+          'vue':'Vue',
+        }),
+      ]
     }
   },
   plugins: [vue(),

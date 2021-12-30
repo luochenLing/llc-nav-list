@@ -1,13 +1,16 @@
 {
   "name": "llc-nav-list",
-  "version": "0.0.0",
+  "version": "0.0.45",
   "main": "./dist/nav-list.umd.js",
+  "types": "./dist/index.d.ts",
+  "typings": "./dist/index.d.ts",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "rollup-plugin-external-globals": "^0.6.1",
     "vite-plugin-dts": "^0.9.6",
     "vue": "^3.2.25"
   },

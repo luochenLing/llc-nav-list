@@ -1,5 +1,3 @@
-import { defineComponent, openBlock, createElementBlock, createElementVNode, normalizeStyle, unref as unref$1, renderSlot } from 'vue';
-
 /**
  * Make a map and return a function for checking if a key
  * is in that map.
@@ -1568,11 +1566,12 @@ function traverse(value, seen) {
 
 var NavList_vue_vue_type_style_index_0_lang = '';
 
-const _sfc_main = /* @__PURE__ */ defineComponent({
+const _sfc_main = /* @__PURE__ */ Vue.defineComponent({
   props: {
     subtractHeight: {
       type: Number,
-      default: 0
+      default: 0,
+      required: true
     },
     viewClientHeight: {
       type: Number,
@@ -1585,7 +1584,7 @@ const _sfc_main = /* @__PURE__ */ defineComponent({
     reBoundExponent: {
       type: Number,
       default: 10,
-      validator(value) {
+      validator: (value) => {
         return value > 0;
       }
     },
@@ -1599,7 +1598,7 @@ const _sfc_main = /* @__PURE__ */ defineComponent({
     domHeight: {
       type: Number,
       default: 0,
-      validator(value) {
+      validator: (value) => {
         return value >= 0;
       }
     }
@@ -1768,22 +1767,32 @@ const _sfc_main = /* @__PURE__ */ defineComponent({
       }
     };
     return (_ctx, _cache) => {
-      return openBlock(), createElementBlock("div", {
+      return Vue.openBlock(), Vue.createElementBlock("div", {
         class: "nav-list-root",
         ref_key: "root",
         ref: root
       }, [
-        createElementVNode("ul", {
+        Vue.createElementVNode("ul", {
           class: "nav-list",
           ref_key: "navList",
           ref: navList,
-          style: normalizeStyle(unref$1(style))
+          style: Vue.normalizeStyle(Vue.unref(style))
         }, [
-          renderSlot(_ctx.$slots, "item")
+          Vue.renderSlot(_ctx.$slots, "item")
         ], 4)
       ], 512);
     };
   }
 });
 
-export { _sfc_main as NavList };
+const withInstall = (comp) => {
+  comp.install = function(app) {
+    app.component(comp.name, comp);
+  };
+  return comp;
+};
+
+const llcNavList = withInstall(_sfc_main);
+
+export { llcNavList };
+//# sourceMappingURL=nav-list.es.js.map

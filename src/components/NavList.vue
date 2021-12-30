@@ -7,54 +7,56 @@
 </template>
 <script setup lang="ts">
 import { computed, ref } from "@vue/reactivity";
-import{defineProps, onBeforeUnmount, onMounted, watch} from '@vue/runtime-core'
+import{defineProps, onBeforeUnmount, onMounted, watch,PropType} from '@vue/runtime-core'
 import { StyleValue } from "vue";
-
 //#region ref
 const root = ref()
 const navList = ref()
 //#endregion
 
 //#region props
+
 const props = defineProps({
   subtractHeight: {
-    type: Number,
-    default: 0
+    type: Number as PropType<number>,
+    default: 0,
+    required:true
   },
   viewClientHeight: {
-    type: Number,
+    type: Number as PropType<number>,
     default: 0
   },
   //近似等于超出边界时最大可拖动距离(px);
   additionalY: {
-    type: Number,
+    type: Number as PropType<number>,
     default: 50
   },
   // 惯性回弹指数(值越大，幅度越大，惯性回弹距离越长);
   reBoundExponent: {
-    type: Number,
+    type: Number as PropType<number>,
     default: 10,
-    validator(value: number) {
+    validator:(value: number)=> {
       return value > 0;
     }
   },
   //灵敏度(惯性滑动时的灵敏度,值越小，阻力越大),可近似认为速度减为零所需的时间(ms);
   sensitivity: {
-    type: Number,
+    type: Number as PropType<number>,
     default: 1000,
-    validator(value: number) {
+    validator(this:boolean, value: number) {
       return value > 0;
     }
   },
   //列表的UL标签的高度，这个主要是应对可伸缩的UL高度进行适应管理
   domHeight: {
-    type: Number,
+    type: Number as PropType<number>,
     default: 0,
-    validator(value: number) {
+    validator:(value: number)=> {
       return value >= 0;
     }
   }
 })
+
 //#endregion
 
 //#region data
