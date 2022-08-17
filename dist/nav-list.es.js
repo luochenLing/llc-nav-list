@@ -1,3 +1,5 @@
+import { defineComponent, openBlock, createElementBlock, createElementVNode, normalizeStyle, unref, renderSlot } from 'vue';
+
 /**
  * Make a map and return a function for checking if a key
  * is in that map.
@@ -16,7 +18,10 @@ function makeMap(str, expectsLowerCase) {
 
 const EMPTY_OBJ = {};
 const NOOP = () => { };
-const extend = Object.assign;
+/**
+ * Always return false.
+ */
+const NO = () => false;
 const remove = (arr, el) => {
     const i = arr.indexOf(el);
     if (i > -1) {
@@ -48,17 +53,9 @@ const isIntegerKey = (key) => isString(key) &&
     '' + parseInt(key, 10) === key;
 // compare whether a value has changed, accounting for NaN.
 const hasChanged = (value, oldValue) => !Object.is(value, oldValue);
-const def = (obj, key, value) => {
-    Object.defineProperty(obj, key, {
-        configurable: true,
-        enumerable: false,
-        value
-    });
-};
 
 let activeEffectScope;
-function recordEffectScope(effect, scope) {
-    scope = scope || activeEffectScope;
+function recordEffectScope(effect, scope = activeEffectScope) {
     if (scope && scope.active) {
         scope.effects.push(effect);
     }
@@ -109,7 +106,6 @@ let trackOpBit = 1;
  * When recursion depth is greater, fall back to using a full cleanup.
  */
 const maxMarkerBits = 30;
-const effectStack = [];
 let activeEffect;
 const ITERATE_KEY = Symbol('');
 const MAP_KEY_ITERATE_KEY = Symbol('');
@@ -119,39 +115,53 @@ class ReactiveEffect {
         this.scheduler = scheduler;
         this.active = true;
         this.deps = [];
+        this.parent = undefined;
         recordEffectScope(this, scope);
     }
     run() {
         if (!this.active) {
             return this.fn();
         }
-        if (!effectStack.includes(this)) {
-            try {
-                effectStack.push((activeEffect = this));
-                enableTracking();
-                trackOpBit = 1 << ++effectTrackDepth;
-                if (effectTrackDepth <= maxMarkerBits) {
-                    initDepMarkers(this);
-                }
-                else {
-                    cleanupEffect(this);
-                }
-                return this.fn();
+        let parent = activeEffect;
+        let lastShouldTrack = shouldTrack;
+        while (parent) {
+            if (parent === this) {
+                return;
             }
-            finally {
-                if (effectTrackDepth <= maxMarkerBits) {
-                    finalizeDepMarkers(this);
-                }
-                trackOpBit = 1 << --effectTrackDepth;
-                resetTracking();
-                effectStack.pop();
-                const n = effectStack.length;
-                activeEffect = n > 0 ? effectStack[n - 1] : undefined;
+            parent = parent.parent;
+        }
+        try {
+            this.parent = activeEffect;
+            activeEffect = this;
+            shouldTrack = true;
+            trackOpBit = 1 << ++effectTrackDepth;
+            if (effectTrackDepth <= maxMarkerBits) {
+                initDepMarkers(this);
+            }
+            else {
+                cleanupEffect(this);
+            }
+            return this.fn();
+        }
+        finally {
+            if (effectTrackDepth <= maxMarkerBits) {
+                finalizeDepMarkers(this);
+            }
+            trackOpBit = 1 << --effectTrackDepth;
+            activeEffect = this.parent;
+            shouldTrack = lastShouldTrack;
+            this.parent = undefined;
+            if (this.deferStop) {
+                this.stop();
             }
         }
     }
     stop() {
-        if (this.active) {
+        // stopped while running itself - defer the cleanup
+        if (activeEffect === this) {
+            this.deferStop = true;
+        }
+        else if (this.active) {
             cleanupEffect(this);
             if (this.onStop) {
                 this.onStop();
@@ -175,30 +185,22 @@ function pauseTracking() {
     trackStack.push(shouldTrack);
     shouldTrack = false;
 }
-function enableTracking() {
-    trackStack.push(shouldTrack);
-    shouldTrack = true;
-}
 function resetTracking() {
     const last = trackStack.pop();
     shouldTrack = last === undefined ? true : last;
 }
 function track(target, type, key) {
-    if (!isTracking()) {
-        return;
+    if (shouldTrack && activeEffect) {
+        let depsMap = targetMap.get(target);
+        if (!depsMap) {
+            targetMap.set(target, (depsMap = new Map()));
+        }
+        let dep = depsMap.get(key);
+        if (!dep) {
+            depsMap.set(key, (dep = createDep()));
+        }
+        trackEffects(dep);
     }
-    let depsMap = targetMap.get(target);
-    if (!depsMap) {
-        targetMap.set(target, (depsMap = new Map()));
-    }
-    let dep = depsMap.get(key);
-    if (!dep) {
-        depsMap.set(key, (dep = createDep()));
-    }
-    trackEffects(dep);
-}
-function isTracking() {
-    return shouldTrack && activeEffect !== undefined;
 }
 function trackEffects(dep, debuggerEventExtraInfo) {
     let shouldTrack = false;
@@ -291,20 +293,37 @@ function trigger(target, type, key, newValue, oldValue, oldTarget) {
 }
 function triggerEffects(dep, debuggerEventExtraInfo) {
     // spread into array for stabilization
-    for (const effect of isArray(dep) ? dep : [...dep]) {
-        if (effect !== activeEffect || effect.allowRecurse) {
-            if (effect.scheduler) {
-                effect.scheduler();
-            }
-            else {
-                effect.run();
-            }
+    const effects = isArray(dep) ? dep : [...dep];
+    for (const effect of effects) {
+        if (effect.computed) {
+            triggerEffect(effect);
+        }
+    }
+    for (const effect of effects) {
+        if (!effect.computed) {
+            triggerEffect(effect);
+        }
+    }
+}
+function triggerEffect(effect, debuggerEventExtraInfo) {
+    if (effect !== activeEffect || effect.allowRecurse) {
+        if (effect.scheduler) {
+            effect.scheduler();
+        }
+        else {
+            effect.run();
         }
     }
 }
 
 const isNonTrackableKeys = /*#__PURE__*/ makeMap(`__proto__,__v_isRef,__isVue`);
-const builtInSymbols = new Set(Object.getOwnPropertyNames(Symbol)
+const builtInSymbols = new Set(
+/*#__PURE__*/
+Object.getOwnPropertyNames(Symbol)
+    // ios10.x Object.getOwnPropertyNames(Symbol) can enumerate 'arguments' and 'caller'
+    // but accessing them on Symbol leads to TypeError because Symbol is a strict mode
+    // function
+    .filter(key => key !== 'arguments' && key !== 'caller')
     .map(key => Symbol[key])
     .filter(isSymbol));
 const get = /*#__PURE__*/ createGetter();
@@ -347,6 +366,9 @@ function createGetter(isReadonly = false, shallow = false) {
         else if (key === "__v_isReadonly" /* IS_READONLY */) {
             return isReadonly;
         }
+        else if (key === "__v_isShallow" /* IS_SHALLOW */) {
+            return shallow;
+        }
         else if (key === "__v_raw" /* RAW */ &&
             receiver ===
                 (isReadonly
@@ -373,9 +395,8 @@ function createGetter(isReadonly = false, shallow = false) {
             return res;
         }
         if (isRef(res)) {
-            // ref unwrapping - does not apply for Array + integer key.
-            const shouldUnwrap = !targetIsArray || !isIntegerKey(key);
-            return shouldUnwrap ? res.value : res;
+            // ref unwrapping - skip unwrap for Array + integer key.
+            return targetIsArray && isIntegerKey(key) ? res : res.value;
         }
         if (isObject(res)) {
             // Convert returned value into a proxy as well. we do the isObject check
@@ -390,9 +411,14 @@ const set = /*#__PURE__*/ createSetter();
 function createSetter(shallow = false) {
     return function set(target, key, value, receiver) {
         let oldValue = target[key];
+        if (isReadonly(oldValue) && isRef(oldValue) && !isRef(value)) {
+            return false;
+        }
         if (!shallow && !isReadonly(value)) {
-            value = toRaw(value);
-            oldValue = toRaw(oldValue);
+            if (!isShallow(value)) {
+                value = toRaw(value);
+                oldValue = toRaw(oldValue);
+            }
             if (!isArray(target) && isRef(oldValue) && !isRef(value)) {
                 oldValue.value = value;
                 return true;
@@ -459,10 +485,12 @@ function get$1(target, key, isReadonly = false, isShallow = false) {
     target = target["__v_raw" /* RAW */];
     const rawTarget = toRaw(target);
     const rawKey = toRaw(key);
-    if (key !== rawKey) {
-        !isReadonly && track(rawTarget, "get" /* GET */, key);
+    if (!isReadonly) {
+        if (key !== rawKey) {
+            track(rawTarget, "get" /* GET */, key);
+        }
+        track(rawTarget, "get" /* GET */, rawKey);
     }
-    !isReadonly && track(rawTarget, "get" /* GET */, rawKey);
     const { has } = getProto(rawTarget);
     const wrap = isShallow ? toShallow : isReadonly ? toReadonly : toReactive;
     if (has.call(rawTarget, key)) {
@@ -481,10 +509,12 @@ function has$1(key, isReadonly = false) {
     const target = this["__v_raw" /* RAW */];
     const rawTarget = toRaw(target);
     const rawKey = toRaw(key);
-    if (key !== rawKey) {
-        !isReadonly && track(rawTarget, "has" /* HAS */, key);
+    if (!isReadonly) {
+        if (key !== rawKey) {
+            track(rawTarget, "has" /* HAS */, key);
+        }
+        track(rawTarget, "has" /* HAS */, rawKey);
     }
-    !isReadonly && track(rawTarget, "has" /* HAS */, rawKey);
     return key === rawKey
         ? target.has(key)
         : target.has(key) || target.has(rawKey);
@@ -732,7 +762,7 @@ function getTargetType(value) {
 }
 function reactive(target) {
     // if trying to observe a readonly proxy, return the readonly version.
-    if (target && target["__v_isReadonly" /* IS_READONLY */]) {
+    if (isReadonly(target)) {
         return target;
     }
     return createReactiveObject(target, false, mutableHandlers, mutableCollectionHandlers, reactiveMap);
@@ -759,7 +789,7 @@ function createReactiveObject(target, isReadonly, baseHandlers, collectionHandle
     if (existingProxy) {
         return existingProxy;
     }
-    // only a whitelist of value types can be observed.
+    // only specific value types can be observed.
     const targetType = getTargetType(target);
     if (targetType === 0 /* INVALID */) {
         return target;
@@ -777,25 +807,21 @@ function isReactive(value) {
 function isReadonly(value) {
     return !!(value && value["__v_isReadonly" /* IS_READONLY */]);
 }
+function isShallow(value) {
+    return !!(value && value["__v_isShallow" /* IS_SHALLOW */]);
+}
 function toRaw(observed) {
     const raw = observed && observed["__v_raw" /* RAW */];
     return raw ? toRaw(raw) : observed;
-}
-function markRaw(value) {
-    def(value, "__v_skip" /* SKIP */, true);
-    return value;
 }
 const toReactive = (value) => isObject(value) ? reactive(value) : value;
 const toReadonly = (value) => isObject(value) ? readonly(value) : value;
 
 function trackRefValue(ref) {
-    if (isTracking()) {
+    if (shouldTrack && activeEffect) {
         ref = toRaw(ref);
-        if (!ref.dep) {
-            ref.dep = createDep();
-        }
         {
-            trackEffects(ref.dep);
+            trackEffects(ref.dep || (ref.dep = createDep()));
         }
     }
 }
@@ -808,7 +834,7 @@ function triggerRefValue(ref, newVal) {
     }
 }
 function isRef(r) {
-    return Boolean(r && r.__v_isRef === true);
+    return !!(r && r.__v_isRef === true);
 }
 function ref(value) {
     return createRef(value, false);
@@ -820,67 +846,48 @@ function createRef(rawValue, shallow) {
     return new RefImpl(rawValue, shallow);
 }
 class RefImpl {
-    constructor(value, _shallow) {
-        this._shallow = _shallow;
+    constructor(value, __v_isShallow) {
+        this.__v_isShallow = __v_isShallow;
         this.dep = undefined;
         this.__v_isRef = true;
-        this._rawValue = _shallow ? value : toRaw(value);
-        this._value = _shallow ? value : toReactive(value);
+        this._rawValue = __v_isShallow ? value : toRaw(value);
+        this._value = __v_isShallow ? value : toReactive(value);
     }
     get value() {
         trackRefValue(this);
         return this._value;
     }
     set value(newVal) {
-        newVal = this._shallow ? newVal : toRaw(newVal);
+        newVal = this.__v_isShallow ? newVal : toRaw(newVal);
         if (hasChanged(newVal, this._rawValue)) {
             this._rawValue = newVal;
-            this._value = this._shallow ? newVal : toReactive(newVal);
+            this._value = this.__v_isShallow ? newVal : toReactive(newVal);
             triggerRefValue(this);
         }
     }
 }
-function unref(ref) {
-    return isRef(ref) ? ref.value : ref;
-}
-const shallowUnwrapHandlers = {
-    get: (target, key, receiver) => unref(Reflect.get(target, key, receiver)),
-    set: (target, key, value, receiver) => {
-        const oldValue = target[key];
-        if (isRef(oldValue) && !isRef(value)) {
-            oldValue.value = value;
-            return true;
-        }
-        else {
-            return Reflect.set(target, key, value, receiver);
-        }
-    }
-};
-function proxyRefs(objectWithRefs) {
-    return isReactive(objectWithRefs)
-        ? objectWithRefs
-        : new Proxy(objectWithRefs, shallowUnwrapHandlers);
-}
 
 class ComputedRefImpl {
-    constructor(getter, _setter, isReadonly) {
+    constructor(getter, _setter, isReadonly, isSSR) {
         this._setter = _setter;
         this.dep = undefined;
-        this._dirty = true;
         this.__v_isRef = true;
+        this._dirty = true;
         this.effect = new ReactiveEffect(getter, () => {
             if (!this._dirty) {
                 this._dirty = true;
                 triggerRefValue(this);
             }
         });
+        this.effect.computed = this;
+        this.effect.active = this._cacheable = !isSSR;
         this["__v_isReadonly" /* IS_READONLY */] = isReadonly;
     }
     get value() {
         // the computed ref may get wrapped by other proxies e.g. readonly() #3376
         const self = toRaw(this);
         trackRefValue(self);
-        if (self._dirty) {
+        if (self._dirty || !self._cacheable) {
             self._dirty = false;
             self._value = self.effect.run();
         }
@@ -890,7 +897,7 @@ class ComputedRefImpl {
         this._setter(newValue);
     }
 }
-function computed(getterOrOptions, debugOptions) {
+function computed(getterOrOptions, debugOptions, isSSR = false) {
     let getter;
     let setter;
     const onlyGetter = isFunction(getterOrOptions);
@@ -902,241 +909,10 @@ function computed(getterOrOptions, debugOptions) {
         getter = getterOrOptions.get;
         setter = getterOrOptions.set;
     }
-    const cRef = new ComputedRefImpl(getter, setter, onlyGetter || !setter);
+    const cRef = new ComputedRefImpl(getter, setter, onlyGetter || !setter, isSSR);
     return cRef;
 }
-Promise.resolve();
 
-function queueEffectWithSuspense(fn, suspense) {
-    if (suspense && suspense.pendingBranch) {
-        if (isArray(fn)) {
-            suspense.effects.push(...fn);
-        }
-        else {
-            suspense.effects.push(fn);
-        }
-    }
-    else {
-        queuePostFlushCb(fn);
-    }
-}
-
-function injectHook(type, hook, target = currentInstance, prepend = false) {
-    if (target) {
-        const hooks = target[type] || (target[type] = []);
-        // cache the error handling wrapper for injected hooks so the same hook
-        // can be properly deduped by the scheduler. "__weh" stands for "with error
-        // handling".
-        const wrappedHook = hook.__weh ||
-            (hook.__weh = (...args) => {
-                if (target.isUnmounted) {
-                    return;
-                }
-                // disable tracking inside all lifecycle hooks
-                // since they can potentially be called inside effects.
-                pauseTracking();
-                // Set currentInstance during hook invocation.
-                // This assumes the hook does not synchronously trigger other hooks, which
-                // can only be false when the user does something really funky.
-                setCurrentInstance(target);
-                const res = callWithAsyncErrorHandling(hook, target, type, args);
-                unsetCurrentInstance();
-                resetTracking();
-                return res;
-            });
-        if (prepend) {
-            hooks.unshift(wrappedHook);
-        }
-        else {
-            hooks.push(wrappedHook);
-        }
-        return wrappedHook;
-    }
-}
-const createHook = (lifecycle) => (hook, target = currentInstance) => 
-// post-create lifecycle registrations are noops during SSR (except for serverPrefetch)
-(!isInSSRComponentSetup || lifecycle === "sp" /* SERVER_PREFETCH */) &&
-    injectHook(lifecycle, hook, target);
-const onMounted = createHook("m" /* MOUNTED */);
-const onBeforeUnmount = createHook("bum" /* BEFORE_UNMOUNT */);
-/**
- * Resolve merged options and cache it on the component.
- * This is done only once per-component since the merging does not involve
- * instances.
- */
-function resolveMergedOptions(instance) {
-    const base = instance.type;
-    const { mixins, extends: extendsOptions } = base;
-    const { mixins: globalMixins, optionsCache: cache, config: { optionMergeStrategies } } = instance.appContext;
-    const cached = cache.get(base);
-    let resolved;
-    if (cached) {
-        resolved = cached;
-    }
-    else if (!globalMixins.length && !mixins && !extendsOptions) {
-        {
-            resolved = base;
-        }
-    }
-    else {
-        resolved = {};
-        if (globalMixins.length) {
-            globalMixins.forEach(m => mergeOptions(resolved, m, optionMergeStrategies, true));
-        }
-        mergeOptions(resolved, base, optionMergeStrategies);
-    }
-    cache.set(base, resolved);
-    return resolved;
-}
-function mergeOptions(to, from, strats, asMixin = false) {
-    const { mixins, extends: extendsOptions } = from;
-    if (extendsOptions) {
-        mergeOptions(to, extendsOptions, strats, true);
-    }
-    if (mixins) {
-        mixins.forEach((m) => mergeOptions(to, m, strats, true));
-    }
-    for (const key in from) {
-        if (asMixin && key === 'expose') ;
-        else {
-            const strat = internalOptionMergeStrats[key] || (strats && strats[key]);
-            to[key] = strat ? strat(to[key], from[key]) : from[key];
-        }
-    }
-    return to;
-}
-const internalOptionMergeStrats = {
-    data: mergeDataFn,
-    props: mergeObjectOptions,
-    emits: mergeObjectOptions,
-    // objects
-    methods: mergeObjectOptions,
-    computed: mergeObjectOptions,
-    // lifecycle
-    beforeCreate: mergeAsArray,
-    created: mergeAsArray,
-    beforeMount: mergeAsArray,
-    mounted: mergeAsArray,
-    beforeUpdate: mergeAsArray,
-    updated: mergeAsArray,
-    beforeDestroy: mergeAsArray,
-    beforeUnmount: mergeAsArray,
-    destroyed: mergeAsArray,
-    unmounted: mergeAsArray,
-    activated: mergeAsArray,
-    deactivated: mergeAsArray,
-    errorCaptured: mergeAsArray,
-    serverPrefetch: mergeAsArray,
-    // assets
-    components: mergeObjectOptions,
-    directives: mergeObjectOptions,
-    // watch
-    watch: mergeWatchOptions,
-    // provide / inject
-    provide: mergeDataFn,
-    inject: mergeInject
-};
-function mergeDataFn(to, from) {
-    if (!from) {
-        return to;
-    }
-    if (!to) {
-        return from;
-    }
-    return function mergedDataFn() {
-        return (extend)(isFunction(to) ? to.call(this, this) : to, isFunction(from) ? from.call(this, this) : from);
-    };
-}
-function mergeInject(to, from) {
-    return mergeObjectOptions(normalizeInject(to), normalizeInject(from));
-}
-function normalizeInject(raw) {
-    if (isArray(raw)) {
-        const res = {};
-        for (let i = 0; i < raw.length; i++) {
-            res[raw[i]] = raw[i];
-        }
-        return res;
-    }
-    return raw;
-}
-function mergeAsArray(to, from) {
-    return to ? [...new Set([].concat(to, from))] : from;
-}
-function mergeObjectOptions(to, from) {
-    return to ? extend(extend(Object.create(null), to), from) : from;
-}
-function mergeWatchOptions(to, from) {
-    if (!to)
-        return from;
-    if (!from)
-        return to;
-    const merged = extend(Object.create(null), to);
-    for (const key in from) {
-        merged[key] = mergeAsArray(to[key], from[key]);
-    }
-    return merged;
-}
-
-const queuePostRenderEffect = queueEffectWithSuspense
-    ;
-
-/**
- * #2437 In Vue 3, functional components do not have a public instance proxy but
- * they exist in the internal parent chain. For code that relies on traversing
- * public $parent chains, skip functional ones and go to the parent instead.
- */
-const getPublicInstance = (i) => {
-    if (!i)
-        return null;
-    if (isStatefulComponent(i))
-        return getExposeProxy(i) || i.proxy;
-    return getPublicInstance(i.parent);
-};
-const publicPropertiesMap = extend(Object.create(null), {
-    $: i => i,
-    $el: i => i.vnode.el,
-    $data: i => i.data,
-    $props: i => (i.props),
-    $attrs: i => (i.attrs),
-    $slots: i => (i.slots),
-    $refs: i => (i.refs),
-    $parent: i => getPublicInstance(i.parent),
-    $root: i => getPublicInstance(i.root),
-    $emit: i => i.emit,
-    $options: i => (resolveMergedOptions(i) ),
-    $forceUpdate: i => () => queueJob(i.update),
-    $nextTick: i => nextTick.bind(i.proxy),
-    $watch: i => (instanceWatch.bind(i) )
-});
-let currentInstance = null;
-const setCurrentInstance = (instance) => {
-    currentInstance = instance;
-    instance.scope.on();
-};
-const unsetCurrentInstance = () => {
-    currentInstance && currentInstance.scope.off();
-    currentInstance = null;
-};
-function isStatefulComponent(instance) {
-    return instance.vnode.shapeFlag & 4 /* STATEFUL_COMPONENT */;
-}
-let isInSSRComponentSetup = false;
-function getExposeProxy(instance) {
-    if (instance.exposed) {
-        return (instance.exposeProxy ||
-            (instance.exposeProxy = new Proxy(proxyRefs(markRaw(instance.exposed)), {
-                get(target, key) {
-                    if (key in target) {
-                        return target[key];
-                    }
-                    else if (key in publicPropertiesMap) {
-                        return publicPropertiesMap[key](instance);
-                    }
-                }
-            })));
-    }
-}
 function callWithErrorHandling(fn, instance, type, args) {
     let res;
     try {
@@ -1208,51 +984,11 @@ let preFlushIndex = 0;
 const pendingPostFlushCbs = [];
 let activePostFlushCbs = null;
 let postFlushIndex = 0;
-const resolvedPromise = Promise.resolve();
-let currentFlushPromise = null;
-let currentPreFlushParentJob = null;
-function nextTick(fn) {
-    const p = currentFlushPromise || resolvedPromise;
-    return fn ? p.then(this ? fn.bind(this) : fn) : p;
-}
-// #2768
-// Use binary-search to find a suitable position in the queue,
-// so that the queue maintains the increasing order of job's id,
-// which can prevent the job from being skipped and also can avoid repeated patching.
-function findInsertionIndex(id) {
-    // the start index should be `flushIndex + 1`
-    let start = flushIndex + 1;
-    let end = queue.length;
-    while (start < end) {
-        const middle = (start + end) >>> 1;
-        const middleJobId = getId(queue[middle]);
-        middleJobId < id ? (start = middle + 1) : (end = middle);
-    }
-    return start;
-}
-function queueJob(job) {
-    // the dedupe search uses the startIndex argument of Array.includes()
-    // by default the search index includes the current job that is being run
-    // so it cannot recursively trigger itself again.
-    // if the job is a watch() callback, the search will start with a +1 index to
-    // allow it recursively trigger itself - it is the user's responsibility to
-    // ensure it doesn't end up in an infinite loop.
-    if ((!queue.length ||
-        !queue.includes(job, isFlushing && job.allowRecurse ? flushIndex + 1 : flushIndex)) &&
-        job !== currentPreFlushParentJob) {
-        if (job.id == null) {
-            queue.push(job);
-        }
-        else {
-            queue.splice(findInsertionIndex(job.id), 0, job);
-        }
-        queueFlush();
-    }
-}
+const resolvedPromise = /*#__PURE__*/ Promise.resolve();
 function queueFlush() {
     if (!isFlushing && !isFlushPending) {
         isFlushPending = true;
-        currentFlushPromise = resolvedPromise.then(flushJobs);
+        resolvedPromise.then(flushJobs);
     }
 }
 function queueCb(cb, activeQueue, pendingQueue, index) {
@@ -1278,7 +1014,6 @@ function queuePostFlushCb(cb) {
 }
 function flushPreFlushCbs(seen, parentJob = null) {
     if (pendingPreFlushCbs.length) {
-        currentPreFlushParentJob = parentJob;
         activePreFlushCbs = [...new Set(pendingPreFlushCbs)];
         pendingPreFlushCbs.length = 0;
         for (preFlushIndex = 0; preFlushIndex < activePreFlushCbs.length; preFlushIndex++) {
@@ -1286,12 +1021,13 @@ function flushPreFlushCbs(seen, parentJob = null) {
         }
         activePreFlushCbs = null;
         preFlushIndex = 0;
-        currentPreFlushParentJob = null;
         // recursively flush until it drains
         flushPreFlushCbs(seen, parentJob);
     }
 }
 function flushPostFlushCbs(seen) {
+    // flush any pre cbs queued during the flush (e.g. pre watchers)
+    flushPreFlushCbs();
     if (pendingPostFlushCbs.length) {
         const deduped = [...new Set(pendingPostFlushCbs)];
         pendingPostFlushCbs.length = 0;
@@ -1343,7 +1079,6 @@ function flushJobs(seen) {
         queue.length = 0;
         flushPostFlushCbs();
         isFlushing = false;
-        currentFlushPromise = null;
         // some postFlushCb queued jobs!
         // keep flushing until it drains.
         if (queue.length ||
@@ -1351,6 +1086,19 @@ function flushJobs(seen) {
             pendingPostFlushCbs.length) {
             flushJobs(seen);
         }
+    }
+}
+function queueEffectWithSuspense(fn, suspense) {
+    if (suspense && suspense.pendingBranch) {
+        if (isArray(fn)) {
+            suspense.effects.push(...fn);
+        }
+        else {
+            suspense.effects.push(fn);
+        }
+    }
+    else {
+        queuePostFlushCb(fn);
     }
 }
 // initial value for watchers to trigger on undefined initial values
@@ -1366,7 +1114,7 @@ function doWatch(source, cb, { immediate, deep, flush, onTrack, onTrigger } = EM
     let isMultiSource = false;
     if (isRef(source)) {
         getter = () => source.value;
-        forceTrigger = !!source._shallow;
+        forceTrigger = isShallow(source);
     }
     else if (isReactive(source)) {
         getter = () => source;
@@ -1374,7 +1122,7 @@ function doWatch(source, cb, { immediate, deep, flush, onTrack, onTrigger } = EM
     }
     else if (isArray(source)) {
         isMultiSource = true;
-        forceTrigger = source.some(isReactive);
+        forceTrigger = source.some(s => isReactive(s) || isShallow(s));
         getter = () => source.map(s => {
             if (isRef(s)) {
                 return s.value;
@@ -1402,7 +1150,7 @@ function doWatch(source, cb, { immediate, deep, flush, onTrack, onTrigger } = EM
                 if (cleanup) {
                     cleanup();
                 }
-                return callWithAsyncErrorHandling(source, instance, 3 /* WATCH_CALLBACK */, [onInvalidate]);
+                return callWithAsyncErrorHandling(source, instance, 3 /* WATCH_CALLBACK */, [onCleanup]);
             };
         }
     }
@@ -1414,11 +1162,28 @@ function doWatch(source, cb, { immediate, deep, flush, onTrack, onTrigger } = EM
         getter = () => traverse(baseGetter());
     }
     let cleanup;
-    let onInvalidate = (fn) => {
+    let onCleanup = (fn) => {
         cleanup = effect.onStop = () => {
             callWithErrorHandling(fn, instance, 4 /* WATCH_CLEANUP */);
         };
     };
+    // in SSR there is no need to setup an actual effect, and it should be noop
+    // unless it's eager
+    if (isInSSRComponentSetup) {
+        // we will also not call the invalidate callback (+ runner is not set up)
+        onCleanup = NOOP;
+        if (!cb) {
+            getter();
+        }
+        else if (immediate) {
+            callWithAsyncErrorHandling(cb, instance, 3 /* WATCH_CALLBACK */, [
+                getter(),
+                isMultiSource ? [] : undefined,
+                onCleanup
+            ]);
+        }
+        return NOOP;
+    }
     let oldValue = isMultiSource ? [] : INITIAL_WATCHER_VALUE;
     const job = () => {
         if (!effect.active) {
@@ -1441,7 +1206,7 @@ function doWatch(source, cb, { immediate, deep, flush, onTrack, onTrigger } = EM
                     newValue,
                     // pass undefined as the old value when it's changed for the first time
                     oldValue === INITIAL_WATCHER_VALUE ? undefined : oldValue,
-                    onInvalidate
+                    onCleanup
                 ]);
                 oldValue = newValue;
             }
@@ -1463,16 +1228,7 @@ function doWatch(source, cb, { immediate, deep, flush, onTrack, onTrigger } = EM
     }
     else {
         // default: 'pre'
-        scheduler = () => {
-            if (!instance || instance.isMounted) {
-                queuePreFlushCb(job);
-            }
-            else {
-                // with 'pre' option, the first call must happen before
-                // the component is mounted so it is called synchronously.
-                job();
-            }
-        };
+        scheduler = () => queuePreFlushCb(job);
     }
     const effect = new ReactiveEffect(getter, scheduler);
     // initial run
@@ -1495,43 +1251,6 @@ function doWatch(source, cb, { immediate, deep, flush, onTrack, onTrigger } = EM
         if (instance && instance.scope) {
             remove(instance.scope.effects, effect);
         }
-    };
-}
-// this.$watch
-function instanceWatch(source, value, options) {
-    const publicThis = this.proxy;
-    const getter = isString(source)
-        ? source.includes('.')
-            ? createPathGetter(publicThis, source)
-            : () => publicThis[source]
-        : source.bind(publicThis, publicThis);
-    let cb;
-    if (isFunction(value)) {
-        cb = value;
-    }
-    else {
-        cb = value.handler;
-        options = value;
-    }
-    const cur = currentInstance;
-    setCurrentInstance(this);
-    const res = doWatch(getter, cb.bind(publicThis), options);
-    if (cur) {
-        setCurrentInstance(cur);
-    }
-    else {
-        unsetCurrentInstance();
-    }
-    return res;
-}
-function createPathGetter(ctx, path) {
-    const segments = path.split('.');
-    return () => {
-        let cur = ctx;
-        for (let i = 0; i < segments.length && cur; i++) {
-            cur = cur[segments[i]];
-        }
-        return cur;
     };
 }
 function traverse(value, seen) {
@@ -1564,9 +1283,88 @@ function traverse(value, seen) {
     return value;
 }
 
+function injectHook(type, hook, target = currentInstance, prepend = false) {
+    if (target) {
+        const hooks = target[type] || (target[type] = []);
+        // cache the error handling wrapper for injected hooks so the same hook
+        // can be properly deduped by the scheduler. "__weh" stands for "with error
+        // handling".
+        const wrappedHook = hook.__weh ||
+            (hook.__weh = (...args) => {
+                if (target.isUnmounted) {
+                    return;
+                }
+                // disable tracking inside all lifecycle hooks
+                // since they can potentially be called inside effects.
+                pauseTracking();
+                // Set currentInstance during hook invocation.
+                // This assumes the hook does not synchronously trigger other hooks, which
+                // can only be false when the user does something really funky.
+                setCurrentInstance(target);
+                const res = callWithAsyncErrorHandling(hook, target, type, args);
+                unsetCurrentInstance();
+                resetTracking();
+                return res;
+            });
+        if (prepend) {
+            hooks.unshift(wrappedHook);
+        }
+        else {
+            hooks.push(wrappedHook);
+        }
+        return wrappedHook;
+    }
+}
+const createHook = (lifecycle) => (hook, target = currentInstance) => 
+// post-create lifecycle registrations are noops during SSR (except for serverPrefetch)
+injectHook(lifecycle, hook, target);
+const onMounted = createHook("m" /* MOUNTED */);
+const onBeforeUnmount = createHook("bum" /* BEFORE_UNMOUNT */);
+
+function createAppContext() {
+    return {
+        app: null,
+        config: {
+            isNativeTag: NO,
+            performance: false,
+            globalProperties: {},
+            optionMergeStrategies: {},
+            errorHandler: undefined,
+            warnHandler: undefined,
+            compilerOptions: {}
+        },
+        mixins: [],
+        components: {},
+        directives: {},
+        provides: Object.create(null),
+        optionsCache: new WeakMap(),
+        propsCache: new WeakMap(),
+        emitsCache: new WeakMap()
+    };
+}
+
+const queuePostRenderEffect = queueEffectWithSuspense
+    ;
+
+createAppContext();
+let currentInstance = null;
+const setCurrentInstance = (instance) => {
+    currentInstance = instance;
+    instance.scope.on();
+};
+const unsetCurrentInstance = () => {
+    currentInstance && currentInstance.scope.off();
+    currentInstance = null;
+};
+let isInSSRComponentSetup = false;
+
 var NavList_vue_vue_type_style_index_0_lang = '';
 
-const _sfc_main = /* @__PURE__ */ Vue.defineComponent({
+const __default__ = defineComponent({
+  name: "llc-nav-list"
+});
+const _sfc_main = /* @__PURE__ */ defineComponent({
+  ...__default__,
   props: {
     subtractHeight: {
       type: Number,
@@ -1703,14 +1501,20 @@ const _sfc_main = /* @__PURE__ */ Vue.defineComponent({
           data.acceleration *= (props.reBoundExponent + Math.abs(data.translateY + listHeight.value)) / props.reBoundExponent;
           data.speed = Math.min(data.speed - data.acceleration, 0);
         } else {
-          data.speed = Math.min(data.speed - data.acceleration * data.frameTime, 0);
+          data.speed = Math.min(
+            data.speed - data.acceleration * data.frameTime,
+            0
+          );
         }
       } else if (isMoveDown.value) {
         if (data.translateY >= 0) {
           data.acceleration *= (props.reBoundExponent + data.translateY) / props.reBoundExponent;
           data.speed = Math.max(data.speed - data.acceleration, 0);
         } else {
-          data.speed = Math.max(data.speed - data.acceleration * data.frameTime, 0);
+          data.speed = Math.max(
+            data.speed - data.acceleration * data.frameTime,
+            0
+          );
         }
       }
       data.translateY += data.speed * data.frameTime / 2;
@@ -1767,18 +1571,18 @@ const _sfc_main = /* @__PURE__ */ Vue.defineComponent({
       }
     };
     return (_ctx, _cache) => {
-      return Vue.openBlock(), Vue.createElementBlock("div", {
+      return openBlock(), createElementBlock("div", {
         class: "nav-list-root",
         ref_key: "root",
         ref: root
       }, [
-        Vue.createElementVNode("ul", {
+        createElementVNode("ul", {
           class: "nav-list",
           ref_key: "navList",
           ref: navList,
-          style: Vue.normalizeStyle(Vue.unref(style))
+          style: normalizeStyle(unref(style))
         }, [
-          Vue.renderSlot(_ctx.$slots, "item")
+          renderSlot(_ctx.$slots, "item")
         ], 4)
       ], 512);
     };

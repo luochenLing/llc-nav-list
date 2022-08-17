@@ -9,6 +9,11 @@
 import { computed, ref } from "@vue/reactivity";
 import{defineProps, onBeforeUnmount, onMounted, watch,PropType} from '@vue/runtime-core'
 import { StyleValue } from "vue";
+
+
+defineOptions({
+  name:'llc-nav-list'
+})
 //#region ref
 const root = ref()
 const navList = ref()
